@@ -17,6 +17,18 @@
 #include "btree.h"
 #include "btree/page_contents.h"
 
+/*
+ * Return values for TupleFetchCallback used by o_find_tuple_version().
+ *
+ * The callback is invoked while traversing the undo chain: first for the
+ * on-page tuple, then for each historical version from undo.  It selects
+ * among versions that share the same snapshot csn/xlogptr (e.g. multiple uncommitted
+ * versions within the same in-progress transaction).
+ *
+ * OTupleFetchMatch    - the tuple matches; stop and return it.
+ * OTupleFetchNotMatch - no match found; stop and return NULL.
+ * OTupleFetchNext     - skip this version; continue to the next undo record.
+ */
 typedef enum
 {
 	OTupleFetchNext,

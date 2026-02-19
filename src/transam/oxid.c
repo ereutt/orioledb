@@ -125,6 +125,18 @@ XidMeta    *xid_meta;
 pg_atomic_uint32 *logicalXidsShmemMap;
 
 OSnapshot	o_in_progress_snapshot = {COMMITSEQNO_INPROGRESS, InvalidXLogRecPtr, 0, 0};
+
+/*
+ * Snapshot that returns uncommitted transactions data (like
+ * o_in_progress_snapshot), but also includes tuples marked as deleted that
+ * are still present on the data page.  This is needed for accessing
+ * SYS_TREES_O_INDICES chunks for trees that may be deleted in uncommitted
+ * (sub-)transactions: on rollback those trees might become visible again.
+ *
+ * Used as the default snapshot for fetching table/index descriptors
+ * (default_table_fetch_context), because processes like the checkpointer or
+ * bgwriter may need to access trees being dropped.
+ */
 OSnapshot	o_non_deleted_snapshot = {COMMITSEQNO_NON_DELETED, InvalidXLogRecPtr, 0, 0};
 
 static OBuffersDesc buffersDesc = {

@@ -483,6 +483,15 @@ generic_toast_insert_optional_wal(ToastAPI *api, void *key, Pointer data,
 }
 
 
+/*
+ * Insert TOAST data with optional WAL logging.
+ *
+ * NB: Each chunk is inserted individually into the system tree.  Typically,
+ * the atomicity is guaranteed by a snapshot.  But with a concurrent reader
+ * with COMMITSEQNO_IN_PROGRESS/COMMITSEQNO_NON_DELETED can observe a
+ * partially written set of chunks (e.g. chunk 0 present, chunk 1 not yet
+ * inserted).
+ */
 bool
 generic_toast_insert(ToastAPI *api, void *key, Pointer data, Size data_size,
 					 OXid oxid, CommitSeqNo csn, void *arg)

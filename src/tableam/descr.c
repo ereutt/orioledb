@@ -107,6 +107,13 @@ static OExclusionFn *last_exclusion_fn = NULL;
 
 static void o_find_toastable_attrs(OTableDescr *tableDescr);
 
+/*
+ * Default context for fetching table/index descriptors from system trees.
+ *
+ * Uses o_non_deleted_snapshot so that trees deleted by uncommitted
+ * (sub-)transactions are still accessible -- they may become visible again
+ * on rollback.
+ */
 OTableFetchContext default_table_fetch_context = {.snapshot = &o_non_deleted_snapshot,.version = O_TABLE_INVALID_VERSION};
 
 /*

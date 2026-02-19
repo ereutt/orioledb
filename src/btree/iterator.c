@@ -274,7 +274,23 @@ o_btree_find_tuple_by_key(BTreeDescr *desc, void *key, BTreeKeyType kind,
 
 
 /*
- * Finds appropriate tuple version in the undo chain.
+ * Finds appropriate tuple version by traversing the undo chain.
+ *
+ * Starts with the on-page tuple, then walks historical versions from undo
+ * records.  Visibility is determined by oSnapshot.
+ *
+ * When a TupleFetchCallback (cb) is provided, it is called for each version
+ * to choose among multiple versions that share the same csn/xlogptr.  This is
+ * useful when there are several uncommitted versions within a single
+ * in-progress transaction.  The callback controls the iteration.
+ *
+ * Note on COMMITSEQNO_NON_DELETED: this CSN is treated as in-progress
+ * (COMMITSEQNO_IS_INPROGRESS returns true for it), so it returns data from
+ * uncommitted transactions just like COMMITSEQNO_INPROGRESS.  The difference
+ * is that NON_DELETED also returns tuples that are marked as deleted but are
+ * still physically present on the page, which is needed when accessing trees
+ * that may be deleted in uncommitted (sub-)transactions — on rollback those
+ * trees become visible again.
  */
 OTuple
 o_find_tuple_version(BTreeDescr *desc, Page p, BTreePageItemLocator *loc,

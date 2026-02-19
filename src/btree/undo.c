@@ -830,9 +830,6 @@ check_pending_truncates(void)
 		pfree(relNodes);
 }
 
-/*
- * Change relnode of btree.
- */
 void
 btree_relnode_undo_callback(UndoLogType undoType, UndoLocation location,
 							UndoStackItem *baseItem,
