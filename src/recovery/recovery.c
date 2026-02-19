@@ -3265,7 +3265,7 @@ replay_wal_record(void *vctx, WalRecord *rec)
 			Assert(!cur_recovery_xid_state->o_tables_meta_locked);
 			o_tables_meta_lock_no_wal();
 			cur_recovery_xid_state->o_tables_meta_locked = true;
-			elog(LOG, "[%s] META_LOCK for [ %u %u %u ] ctx->sys_tree_num %d", __func__,
+			elog(DEBUG3, "[%s] META_LOCK for [ %u %u %u ] ctx->sys_tree_num %d", __func__,
 				 rec->oids.datoid, rec->oids.reloid, rec->oids.relnode, ctx->sys_tree_num);
 			break;
 
@@ -3273,7 +3273,7 @@ replay_wal_record(void *vctx, WalRecord *rec)
 			{
 				XLogRecPtr	xlogPtr = ctx->xlogRecPtr + rec->delta;
 
-				elog(LOG, "[%s] META_UNLOCK for [ %u %u %u ] ctx->sys_tree_num %d", __func__,
+				elog(DEBUG3, "[%s] META_UNLOCK for [ %u %u %u ] ctx->sys_tree_num %d", __func__,
 					 rec->oids.datoid, rec->oids.reloid, rec->oids.relnode, ctx->sys_tree_num);
 
 				if (!ctx->single)
@@ -3424,7 +3424,7 @@ replay_wal_record(void *vctx, WalRecord *rec)
 
 				if (ctx->indexDescr->desc.type == oIndexBridge)
 				{
-					elog(LOG, "WAL change for bridge index");
+					elog(DEBUG3, "WAL change for bridge index");
 				}
 
 				Assert(!O_TUPLE_IS_NULL(tuple1.tuple));
