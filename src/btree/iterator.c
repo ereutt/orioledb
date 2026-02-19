@@ -37,9 +37,9 @@ typedef struct
 	char		image[ORIOLEDB_BLCKSZ];
 	/* a lokey of the image for backward scan */
 	OFixedKey	lokey;
-	/* a base undo location */
+	/* a base undo location, from the data page header */
 	UndoLocation baseLoc;
-	/* undo location of the image */
+	/* undo location of the `image` in this struct */
 	UndoLocation imageUndoLoc;
 	/* is the image leftmost on the base location */
 	bool		leftmost;
@@ -890,21 +890,30 @@ o_btree_interator_can_fetch_from_undo(BTreeDescr *desc, BTreeIterator *it)
 				img = it->context.img;
 	BTreePageHeader *header = (BTreePageHeader *) img;
 
-	if (!BTREE_PAGE_LOCATOR_IS_VALID(hImg, &it->undoLoc))
-	{
-		bool		can_switch = it->combinedResult && header->csn >= it->oSnapshot.csn;
+	/*
+	 * Nothing to do if we're not on the combined page.  All the undo items
+	 * corresponding to the data page key range must happen while we're on
+	 * that data page.
+	 */
+	if (!it->combinedPage)
+		return false;
 
+	Assert(it->combinedResult && header->csn >= it->oSnapshot.csn);
+
+	while (!BTREE_PAGE_LOCATOR_IS_VALID(hImg, &it->undoLoc))
+	{
 		/* switch to next history page if we can */
 		if (undo_it_next_page(it->context.desc, &it->undoIt) ||
-			(can_switch && undo_it_switch(desc, &it->undoIt, header->undoLocation)))
+			undo_it_switch(desc, &it->undoIt, header->undoLocation))
 		{
 			if (IT_IS_FORWARD(it))
 				BTREE_PAGE_LOCATOR_FIRST(hImg, &it->undoLoc);
 			else
 				BTREE_PAGE_LOCATOR_LAST(hImg, &it->undoLoc);
-
-			Assert(it->combinedPage);
-			Assert(BTREE_PAGE_LOCATOR_IS_VALID(hImg, &it->undoLoc));
+		}
+		else
+		{
+			break;
 		}
 	}
 
@@ -912,8 +921,8 @@ o_btree_interator_can_fetch_from_undo(BTreeDescr *desc, BTreeIterator *it)
 }
 
 /*
- * Check if `historicalImg` still contains tuples corresponding to the `img`
- * key range.
+ * Check if `historicalImg` still contains more tuples corresponding to
+ * the `img` key range.
  */
 static bool
 can_fetch_from_undo(BTreeIterator *it)
@@ -1087,7 +1096,7 @@ undo_it_init(UndoIterator *undoIt, UndoLocation location, void *key, BTreeKeyTyp
 }
 
 /*
- * Tries to switch to next undo page from baseLoc
+ * Tries to switch to next undo page from the same baseLoc
  */
 static bool
 undo_it_next_page(BTreeDescr *desc, UndoIterator *undoIt)
@@ -1142,7 +1151,7 @@ undo_it_switch(BTreeDescr *desc, UndoIterator *undoIt, UndoLocation location)
 {
 	bool		is_forward = IT_IS_FORWARD(undoIt->it);
 
-	if (!UndoLocationIsValid(location))
+	if (!UndoLocationIsValid(location) || undoIt->baseLoc == location)
 		return false;
 
 	if (!UndoLocationIsValid(undoIt->baseLoc))
