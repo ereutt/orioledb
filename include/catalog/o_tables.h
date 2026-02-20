@@ -143,6 +143,16 @@ typedef struct
 												   "OTableContext", \
 												   ALLOCSET_DEFAULT_SIZES)))
 
+/*
+ * Maximum number of retries when deserialization fails due to truncated toast
+ * data (missing chunks from a concurrent write race condition).
+ */
+#define O_DESERIALIZE_MAX_RETRIES 100
+
+/* Parameters for a deserialization retry exponential backoff. */
+#define O_DESERIALIZE_RETRY_MIN_DURATION (1000L)
+#define O_DESERIALIZE_RETRY_MAX_DURATION (100000L)
+
 extern void o_table_fill_index(OTable *o_table, OIndexNumber ix_num,
 							   Relation index_rel);
 
@@ -239,8 +249,10 @@ extern void o_tables_rel_unlock_extended(ORelOids *oids, int lockmode, bool chec
 /* Deserialize OTable stored in O_TABLES sys tree */
 extern void o_serialize_node(Node *node, StringInfo str);
 extern Node *o_deserialize_node(Pointer *ptr);
+extern bool o_deserialize_node_safe(Pointer *ptr, Pointer data, Size length, Node **out);
 extern void o_serialize_string(char *serialized, StringInfo str);
 extern char *o_deserialize_string(Pointer *ptr);
+extern bool o_deserialize_string_safe(Pointer *ptr, Pointer data, Size length, char **out);
 
 static inline bool
 o_tables_rel_try_lock(ORelOids *oids, int lockmode, bool *nested)

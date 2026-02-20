@@ -735,6 +735,34 @@ o_deserialize_string(Pointer *ptr)
 	return result;
 }
 
+/*
+ * Bounds-checking variant of o_deserialize_string().  Returns false if the
+ * remaining data is too short, leaving *ptr and *out unchanged.
+ */
+bool
+o_deserialize_string_safe(Pointer *ptr, Pointer data, Size length, char **out)
+{
+	size_t		str_len;
+
+	if ((*ptr - data) + (int) sizeof(size_t) > length)
+		return false;
+	memcpy(&str_len, *ptr, sizeof(size_t));
+	*ptr += sizeof(size_t);
+
+	if (str_len != 0)
+	{
+		if ((*ptr - data) + (Size) str_len > length)
+			return false;
+		*out = (char *) palloc(str_len);
+		memcpy(*out, *ptr, str_len);
+		*ptr += str_len;
+	}
+	else
+		*out = NULL;
+
+	return true;
+}
+
 void
 o_serialize_node(Node *node, StringInfo str)
 {
@@ -763,6 +791,27 @@ o_deserialize_node(Pointer *ptr)
 	result = stringToNode(*ptr);
 	*ptr += len;
 	return result;
+}
+
+/*
+ * Bounds-checking variant of o_deserialize_node().  Returns false if the
+ * remaining data is too short, leaving *ptr and *out unchanged.
+ */
+bool
+o_deserialize_node_safe(Pointer *ptr, Pointer data, Size length, Node **out)
+{
+	size_t		node_str_len;
+
+	if ((*ptr - data) + (int) sizeof(size_t) > length)
+		return false;
+	memcpy(&node_str_len, *ptr, sizeof(size_t));
+	*ptr += sizeof(size_t);
+
+	if ((*ptr - data) + (Size) node_str_len > length)
+		return false;
+	*out = stringToNode(*ptr);
+	*ptr += node_str_len;
+	return true;
 }
 
 static Pointer
@@ -799,6 +848,10 @@ serialize_o_index(OIndex *o_index, int *size)
 	return str.data;
 }
 
+/*
+ * Deserialize OIndex from toast data.  Returns NULL if the data is truncated
+ * (e.g. due to missing toast chunks from a concurrent write race condition).
+ */
 static OIndex *
 deserialize_o_index(OIndexChunkKey *key, Pointer data, Size length)
 {
@@ -814,7 +867,8 @@ deserialize_o_index(OIndexChunkKey *key, Pointer data, Size length)
 	oIndex->indexVersion = key->version;
 
 	len = offsetof(OIndex, leafTableFields) - offsetof(OIndex, tableOids);
-	Assert((ptr - data) + len <= length);
+	if ((ptr - data) + len > length)
+		goto truncated;
 	memcpy((Pointer) oIndex + offsetof(OIndex, tableOids), ptr, len);
 	ptr += len;
 	if (oIndex->data_version != ORIOLEDB_SYS_TREE_VERSION)
@@ -823,28 +877,54 @@ deserialize_o_index(OIndexChunkKey *key, Pointer data, Size length)
 			 oIndex->data_version, ORIOLEDB_SYS_TREE_VERSION);
 
 	len = oIndex->nLeafFields * sizeof(OTableField);
+	if ((ptr - data) + len > length)
+		goto truncated;
 	oIndex->leafTableFields = (OTableField *) palloc(len);
-	Assert((ptr - data) + len <= length);
 	memcpy(oIndex->leafTableFields, ptr, len);
 	ptr += len;
 
 	len = oIndex->nLeafFields * sizeof(OTableIndexField);
+	if ((ptr - data) + len > length)
+		goto truncated;
 	oIndex->leafFields = (OTableIndexField *) palloc(len);
-	Assert((ptr - data) + len <= length);
 	memcpy(oIndex->leafFields, ptr, len);
 	ptr += len;
 
 	mcxt = OGetIndexContext(oIndex);
 	old_mcxt = MemoryContextSwitchTo(mcxt);
-	oIndex->predicate = (List *) o_deserialize_node(&ptr);
+
+	if (!o_deserialize_node_safe(&ptr, data, length,
+								 (Node **) &oIndex->predicate))
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		goto truncated;
+	}
 	if (oIndex->predicate)
-		oIndex->predicate_str = o_deserialize_string(&ptr);
-	oIndex->expressions = (List *) o_deserialize_node(&ptr);
-	oIndex->duplicates = (List *) o_deserialize_node(&ptr);
+	{
+		if (!o_deserialize_string_safe(&ptr, data, length,
+									   &oIndex->predicate_str))
+		{
+			MemoryContextSwitchTo(old_mcxt);
+			goto truncated;
+		}
+	}
+	if (!o_deserialize_node_safe(&ptr, data, length,
+								 (Node **) &oIndex->expressions))
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		goto truncated;
+	}
+	if (!o_deserialize_node_safe(&ptr, data, length,
+								 (Node **) &oIndex->duplicates))
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		goto truncated;
+	}
 	MemoryContextSwitchTo(old_mcxt);
 
 	len = sizeof(Oid);
-	Assert((ptr - data) + len <= length);
+	if ((ptr - data) + len > length)
+		goto truncated;
 	memcpy(&oIndex->tablespace, ptr, len);
 	ptr += len;
 
@@ -853,7 +933,11 @@ deserialize_o_index(OIndexChunkKey *key, Pointer data, Size length)
 		mcxt = OGetIndexContext(oIndex);
 		old_mcxt = MemoryContextSwitchTo(mcxt);
 		len = sizeof(Oid) * oIndex->nKeyFields;
-		Assert((ptr - data) + len <= length);
+		if ((ptr - data) + len > length)
+		{
+			MemoryContextSwitchTo(old_mcxt);
+			goto truncated;
+		}
 		oIndex->exclops = (Oid *) palloc0(len);
 		memcpy(oIndex->exclops, ptr, len);
 		ptr += len;
@@ -861,13 +945,25 @@ deserialize_o_index(OIndexChunkKey *key, Pointer data, Size length)
 	}
 
 	len = sizeof(bool);
-	Assert((ptr - data) + len <= length);
+	if ((ptr - data) + len > length)
+		goto truncated;
 	memcpy(&oIndex->immediate, ptr, len);
 	ptr += len;
 
-	Assert((ptr - data) == length);
+	if ((ptr - data) != length)
+		goto truncated;
 
 	return oIndex;
+
+truncated:
+	if (oIndex->leafTableFields)
+		pfree(oIndex->leafTableFields);
+	if (oIndex->leafFields)
+		pfree(oIndex->leafFields);
+	if (oIndex->index_mctx)
+		MemoryContextDelete(oIndex->index_mctx);
+	pfree(oIndex);
+	return NULL;
 }
 
 /*
@@ -1362,14 +1458,16 @@ o_indices_get(ORelOids oids, OIndexType type)
 	return o_indices_get_extended(oids, type, default_table_fetch_context);
 }
 
+/*
+ * If deserialization fails due to truncated toast data (missing chunks from a
+ * concurrent write), retries with exponential backoff up to
+ * O_DESERIALIZE_MAX_RETRIES times before reporting an error.
+ */
 OIndex *
 o_indices_get_extended(ORelOids oids, OIndexType type, OTableFetchContext ctx)
 {
-	OIndexChunkKey key,
-			   *found_key = NULL;
-	Size		dataLength;
-	Pointer		result;
-	OIndex	   *oIndex;
+	OIndexChunkKey key;
+	int			retry;
 
 	key.type = type;
 	key.oids = oids;
@@ -1382,21 +1480,46 @@ o_indices_get_extended(ORelOids oids, OIndexType type, OTableFetchContext ctx)
 		 key.chunknum,
 		 key.version);
 
-	found_key = &key;
-	result = generic_toast_get_any_with_key(&oIndicesToastAPI, (Pointer) &key,
-											&dataLength,
-											ctx.snapshot,
-											get_sys_tree(SYS_TREES_O_INDICES),
-											(Pointer *) &found_key);
+	for (retry = 0;; retry++)
+	{
+		OIndexChunkKey *found_key = NULL;
+		Size		dataLength;
+		Pointer		result;
+		OIndex	   *oIndex;
 
-	if (result == NULL)
-		return NULL;
+		found_key = &key;
+		result = generic_toast_get_any_with_key(&oIndicesToastAPI,
+												(Pointer) &key,
+												&dataLength,
+												ctx.snapshot,
+												get_sys_tree(SYS_TREES_O_INDICES),
+												(Pointer *) &found_key);
 
-	oIndex = deserialize_o_index(&key, result, dataLength);
-	pfree(result);
-	pfree(found_key);
+		if (result == NULL)
+			return NULL;
 
-	return oIndex;
+		oIndex = deserialize_o_index(&key, result, dataLength);
+		pfree(result);
+
+		if (oIndex != NULL)
+		{
+			pfree(found_key);
+			return oIndex;
+		}
+
+		/* Truncated data — concurrent chunk write in progress, retry */
+		pfree(found_key);
+
+		if (retry >= O_DESERIALIZE_MAX_RETRIES ||
+			!COMMITSEQNO_IS_INPROGRESS(ctx.snapshot->csn))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed to deserialize OIndex (%u, %u, %u) type %u after %d retries",
+							oids.datoid, oids.reloid, oids.relnode,
+							type, retry + 1)));
+
+		pg_usleep(Min(O_DESERIALIZE_RETRY_MIN_DURATION << retry, O_DESERIALIZE_RETRY_MAX_DURATION));
+	}
 }
 
 bool

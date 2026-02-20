@@ -1144,37 +1144,63 @@ o_tables_add(OTable *table, OXid oxid, CommitSeqNo csn)
 }
 
 /*
- * Same as o_tables_get, if version not NULL find o_tables with passed version
+ * Same as o_tables_get, if version not NULL find o_tables with passed version.
+ *
+ * If deserialization fails due to truncated toast data (missing chunks from a
+ * concurrent write), retries with exponential backoff up to
+ * O_DESERIALIZE_MAX_RETRIES times before reporting an error.
  */
 OTable *
 o_tables_get_extended(ORelOids oids, OTableFetchContext ctx)
 {
-	OTableChunkKey key,
-			   *found_key = NULL;
-	Pointer		result;
-	Size		dataLength;
-	OTable	   *oTable;
+	OTableChunkKey key;
+	int			retry;
 
 	key.oids = oids;
 	key.chunknum = 0;
 	key.version = ctx.version;
 
-	found_key = &key;
-	result = generic_toast_get_any_with_key(&oTablesToastAPI, (Pointer) &key,
-											&dataLength,
-											ctx.snapshot,
-											get_sys_tree(SYS_TREES_O_TABLES),
-											(Pointer *) &found_key);
+	for (retry = 0;; retry++)
+	{
+		OTableChunkKey *found_key = NULL;
+		Pointer		result;
+		Size		dataLength;
+		OTable	   *oTable;
 
-	if (result == NULL)
-		return NULL;
+		found_key = &key;
+		result = generic_toast_get_any_with_key(&oTablesToastAPI,
+												(Pointer) &key,
+												&dataLength,
+												ctx.snapshot,
+												get_sys_tree(SYS_TREES_O_TABLES),
+												(Pointer *) &found_key);
 
-	oTable = deserialize_o_table(result, dataLength);
-	oTable->version = found_key->version;
-	pfree(result);
-	pfree(found_key);
+		if (result == NULL)
+			return NULL;
 
-	return oTable;
+		oTable = deserialize_o_table(result, dataLength);
+		pfree(result);
+
+		if (oTable != NULL)
+		{
+			oTable->version = found_key->version;
+			pfree(found_key);
+			return oTable;
+		}
+
+		/* Truncated data — concurrent chunk write in progress, retry */
+		pfree(found_key);
+
+		if (retry >= O_DESERIALIZE_MAX_RETRIES ||
+			!COMMITSEQNO_IS_INPROGRESS(ctx.snapshot->csn))
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed to deserialize OTable (%u, %u, %u) after %d retries",
+							oids.datoid, oids.reloid, oids.relnode,
+							retry + 1)));
+
+		pg_usleep(Min(O_DESERIALIZE_RETRY_MIN_DURATION << retry, O_DESERIALIZE_RETRY_MAX_DURATION));
+	}
 }
 
 /*
@@ -1754,14 +1780,20 @@ serialize_o_table(OTable *o_table, int *size)
 	return str.data;
 }
 
-static void
-deserialize_o_table_index(OTableIndex *o_table_index, Pointer *ptr, uint16 data_version)
+/*
+ * Returns false if the data is truncated (missing toast chunks).
+ */
+static bool
+deserialize_o_table_index(OTableIndex *o_table_index, Pointer *ptr,
+						  Pointer data, Size length, uint16 data_version)
 {
 	int			len;
 	MemoryContext mcxt,
 				old_mcxt;
 
 	len = offsetof(OTableIndex, exprfields);
+	if ((*ptr - data) + len > length)
+		return false;
 	memcpy(o_table_index, *ptr, len);
 	*ptr += len;
 
@@ -1769,34 +1801,76 @@ deserialize_o_table_index(OTableIndex *o_table_index, Pointer *ptr, uint16 data_
 	mcxt = OGetIndexContext(o_table_index);
 	old_mcxt = MemoryContextSwitchTo(mcxt);
 	len = o_table_index->nexprfields * sizeof(OTableField);
+	if ((*ptr - data) + len > length)
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		return false;
+	}
 	o_table_index->exprfields = (OTableField *) palloc0(len);
 	memcpy(o_table_index->exprfields, *ptr, len);
 	*ptr += len;
 
-	o_table_index->predicate = (List *) o_deserialize_node(ptr);
+	if (!o_deserialize_node_safe(ptr, data, length,
+								 (Node **) &o_table_index->predicate))
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		return false;
+	}
 	if (o_table_index->predicate)
-		o_table_index->predicate_str = o_deserialize_string(ptr);
-	o_table_index->expressions = (List *) o_deserialize_node(ptr);
+	{
+		if (!o_deserialize_string_safe(ptr, data, length,
+									   &o_table_index->predicate_str))
+		{
+			MemoryContextSwitchTo(old_mcxt);
+			return false;
+		}
+	}
+	if (!o_deserialize_node_safe(ptr, data, length,
+								 (Node **) &o_table_index->expressions))
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		return false;
+	}
 
 	len = sizeof(Oid);
+	if ((*ptr - data) + len > length)
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		return false;
+	}
 	memcpy(&o_table_index->tablespace, *ptr, len);
 	*ptr += len;
 
 	if (o_table_index->type == oIndexExclusion)
 	{
 		len = sizeof(Oid) * o_table_index->nkeyfields;
+		if ((*ptr - data) + len > length)
+		{
+			MemoryContextSwitchTo(old_mcxt);
+			return false;
+		}
 		o_table_index->exclops = (Oid *) palloc0(len);
 		memcpy(o_table_index->exclops, *ptr, len);
 		*ptr += len;
 	}
 
 	len = sizeof(bool);
+	if ((*ptr - data) + len > length)
+	{
+		MemoryContextSwitchTo(old_mcxt);
+		return false;
+	}
 	memcpy(&o_table_index->immediate, *ptr, len);
 	*ptr += len;
 
 	MemoryContextSwitchTo(old_mcxt);
+	return true;
 }
 
+/*
+ * Deserialize OTable from toast data.  Returns NULL if the data is truncated
+ * (e.g. due to missing toast chunks from a concurrent write race condition).
+ */
 OTable *
 deserialize_o_table(Pointer data, Size length)
 {
@@ -1809,7 +1883,11 @@ deserialize_o_table(Pointer data, Size length)
 
 	o_table = (OTable *) palloc0(sizeof(OTable));
 	len = offsetof(OTable, indices);
-	Assert((ptr - data) + len <= length);
+	if ((ptr - data) + len > length)
+	{
+		pfree(o_table);
+		return NULL;
+	}
 	memcpy(o_table, ptr, len);
 	ptr += len;
 
@@ -1820,16 +1898,31 @@ deserialize_o_table(Pointer data, Size length)
 	o_table->indices = (OTableIndex *) palloc0(len);
 	for (i = 0; i < o_table->nindices; i++)
 	{
-		deserialize_o_table_index(&o_table->indices[i], &ptr, o_table->data_version);
+		if (!deserialize_o_table_index(&o_table->indices[i], &ptr,
+									   data, length, o_table->data_version))
+		{
+			MemoryContextSwitchTo(oldcxt);
+			o_table_free(o_table);
+			return NULL;
+		}
 	}
-	Assert((ptr - data) <= length);
+	if ((ptr - data) > length)
+	{
+		MemoryContextSwitchTo(oldcxt);
+		o_table_free(o_table);
+		return NULL;
+	}
 
 	len = o_table->nfields * sizeof(OTableField);
+	if ((ptr - data) + len > length)
+	{
+		MemoryContextSwitchTo(oldcxt);
+		o_table_free(o_table);
+		return NULL;
+	}
 	o_table->fields = (OTableField *) palloc(len);
-	Assert((ptr - data) + len <= length);
 	memcpy(o_table->fields, ptr, len);
 	ptr += len;
-	Assert(ptr - data <= length);
 
 	o_table->missing = (AttrMissing *)
 		palloc(o_table->nfields * sizeof(AttrMissing));
@@ -1839,18 +1932,38 @@ deserialize_o_table(Pointer data, Size length)
 		AttrMissing *miss = &o_table->missing[i];
 		bool		isnull;
 
+		if ((ptr - data) + (int) sizeof(bool) > length)
+		{
+			MemoryContextSwitchTo(oldcxt);
+			o_table_free(o_table);
+			return NULL;
+		}
 		memcpy(&miss->am_present, ptr, sizeof(bool));
 		ptr += sizeof(bool);
 		miss->am_value = datumRestore(&ptr, &isnull);
+		if ((ptr - data) > length)
+		{
+			MemoryContextSwitchTo(oldcxt);
+			o_table_free(o_table);
+			return NULL;
+		}
 	}
 	MemoryContextSwitchTo(oldcxt);
 
 	len = sizeof(Oid);
-	Assert((ptr - data) + len <= length);
+	if ((ptr - data) + len > length)
+	{
+		o_table_free(o_table);
+		return NULL;
+	}
 	memcpy(&o_table->tablespace, ptr, len);
 	ptr += len;
 
-	Assert(ptr - data == length);
+	if (ptr - data != length)
+	{
+		o_table_free(o_table);
+		return NULL;
+	}
 	return o_table;
 }
 
