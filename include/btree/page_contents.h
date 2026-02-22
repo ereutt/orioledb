@@ -414,7 +414,7 @@ typedef struct
 	ORelOids	reloids;
 	OPageWaiterStatus status;
 	uint32		pageChangeCount;
-	LocalTransactionId localXid;
+	int			autonomousNestingLevel;
 	uint8		tupleFlags;
 	bool		inserted;
 	Size		reservedUndoSize;

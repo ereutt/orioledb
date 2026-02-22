@@ -283,6 +283,7 @@ lock_page_or_queue_or_split_detect(BTreeDescr *desc, OInMemoryBlkno *blkno,
 			lockerState->status = OPageWaitInsert;
 			lockerState->undoLocation = InvalidUndoLocation;
 			lockerState->pageChangeCount = *pageChangeCount;
+			lockerState->autonomousNestingLevel = GET_CUR_PROCDATA()->autonomousNestingLevel;
 			Assert(!lockerState->inserted);
 			lockerState->next = (state & PAGE_STATE_LIST_TAIL_MASK);
 			newState = state & (~PAGE_STATE_LIST_TAIL_MASK);

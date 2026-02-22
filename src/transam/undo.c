@@ -1792,7 +1792,8 @@ add_new_undo_stack_item(UndoLogType undoType, UndoLocation location)
 void
 add_new_undo_stack_item_to_process(UndoLogType undoType,
 								   UndoLocation location,
-								   int pgprocno, LocalTransactionId localXid)
+								   int pgprocno,
+								   int autonomousNestingLevel)
 {
 	UndoStackItem *item = (UndoStackItem *) GET_UNDO_REC(undoType, location);
 	UndoStackSharedLocations *sharedLocations;
@@ -1800,7 +1801,7 @@ add_new_undo_stack_item_to_process(UndoLogType undoType,
 
 	Assert(!descr->callOnCommit);
 
-	sharedLocations = &oProcData[pgprocno].undoStackLocations[localXid % PROC_XID_ARRAY_SIZE][undoType];
+	sharedLocations = &oProcData[pgprocno].undoStackLocations[autonomousNestingLevel][undoType];
 	item->prev = pg_atomic_read_u64(&sharedLocations->location);
 	pg_atomic_write_u64(&sharedLocations->location, location);
 

@@ -361,7 +361,7 @@ extern UndoLocation get_subxact_undo_location(UndoLogType undoType);
 extern void add_new_undo_stack_item_to_process(UndoLogType undoType,
 											   UndoLocation location,
 											   int pgprocno,
-											   LocalTransactionId localXid);
+											   int autonomousNestingLevel);
 extern void read_shared_undo_locations(UndoStackLocations *to, UndoStackSharedLocations *from);
 extern void write_shared_undo_locations(UndoStackSharedLocations *to, UndoStackLocations *from);
 extern void get_cur_undo_locations(UndoStackLocations *locations,

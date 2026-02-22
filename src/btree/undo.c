@@ -412,7 +412,7 @@ make_waiter_undo_record(BTreeDescr *desc, OInMemoryBlkno blkno, int pgprocno,
 
 	lockerState->undoLocation = undoLocation;
 	add_new_undo_stack_item_to_process(desc->undoType, undoLocation, pgprocno,
-									   lockerState->localXid);
+									   lockerState->autonomousNestingLevel);
 }
 
 static BTreeDescr *
